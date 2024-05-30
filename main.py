@@ -6,21 +6,23 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from io import BytesIO
+import time
 
-# Function to fetch and parse XML from a URL
-def fetch_and_parse_xml(url):
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        xml_content = response.content
-        tree = ET.ElementTree(ET.fromstring(xml_content))
-        return tree
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch URL {url}: {e}")
-        return None
-    except ET.ParseError as e:
-        print(f"Failed to parse XML from URL {url}: {e}")
-        return None
+# Function to fetch and parse XML from a URL with retries
+def fetch_and_parse_xml(url, retries=3, delay=5):
+    for attempt in range(retries):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            xml_content = response.content
+            tree = ET.ElementTree(ET.fromstring(xml_content))
+            return tree
+        except (requests.exceptions.RequestException, ET.ParseError) as e:
+            print(f"Failed to fetch URL {url} on attempt {attempt + 1}: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                return None
 
 # Function to rearrange XML data
 def rearrange_xml(root):
@@ -30,8 +32,12 @@ def rearrange_xml(root):
     other_items = []
 
     for item in root.findall('item'):
-        is_featured = item.find('isfeatured').text
-        condition = item.find('condition').text
+        is_featured = item.find('isfeatured')
+        condition = item.find('condition')
+
+        # Ensure tags exist and extract text, defaulting to empty strings if missing
+        is_featured = is_featured.text if is_featured is not None else ''
+        condition = condition.text if condition is not None else ''
 
         if is_featured == '1':
             featured_items.append(item)
@@ -60,17 +66,24 @@ spreadsheet = gspread.service_account(filename=r"C:\Users\user\xml_url_read\clie
 # Select the sheet named "Market Place"
 sheet = spreadsheet.worksheet("Market Place")
 
-# Get all XML links from the second column and their corresponding row numbers
-xml_links_and_rows = [(link, i) for i, link in enumerate(sheet.col_values(2)[1:], start=2)]  # Exclude header row
+# Get XML links and names from rows 28 to 33
+xml_links_and_rows = [(sheet.cell(i, 1).value, sheet.cell(i, 2).value, i) for i in range(28, 34)]
 
 # Process each XML link and update the corresponding row with the URL of the file containing the rearranged XML content
-for xml_link, row in xml_links_and_rows:
+for name, xml_link, row in xml_links_and_rows:
+    # Introduce a delay before fetching the URL
+    time.sleep(5)  # wait for 5 seconds
+
     xml_tree = fetch_and_parse_xml(xml_link)
     if xml_tree:
         root = xml_tree.getroot()
 
         # Rearrange XML data
         rearranged_items = rearrange_xml(root)
+
+        if not rearranged_items:
+            print(f"No items found for URL {xml_link} at row {row}")
+            continue
 
         # Create a new root element for the rearranged XML
         new_root = ET.Element("inventory")
@@ -83,7 +96,7 @@ for xml_link, row in xml_links_and_rows:
         new_xml_content = ET.tostring(new_root, encoding='utf-8')
 
         # Create a file in Google Drive
-        file_metadata = {'name': f"rearranged_{row}.xml"}
+        file_metadata = {'name': f"{name}.xml"}
         media = MediaIoBaseUpload(BytesIO(new_xml_content), mimetype='application/xml', resumable=True)
         file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
@@ -101,3 +114,5 @@ for xml_link, row in xml_links_and_rows:
 
         # Print the updated XML URL
         print(f"Updated XML URL for row {row}: {shareable_link}")
+    else:
+        print(f"Failed to fetch or parse XML for URL {xml_link} at row {row}")
