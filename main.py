@@ -66,8 +66,25 @@ spreadsheet = gspread.service_account(filename=r"C:\Users\user\xml_url_read\clie
 # Select the sheet named "Market Place"
 sheet = spreadsheet.worksheet("Market Place")
 
-# Get XML links and names from rows 28 to 33
-xml_links_and_rows = [(sheet.cell(i, 1).value, sheet.cell(i, 2).value, i) for i in range(28, 34)]
+# Fetch all data from the worksheet at once to avoid exceeding the quota
+all_data = sheet.get_all_values()
+xml_links_and_rows = [(row[0], row[1], i + 2) for i, row in enumerate(all_data[1:]) if len(row) >= 2]
+
+# Function to check if file exists and return its ID
+def get_file_id_by_name(name):
+    page_token = None
+    while True:
+        response = drive_service.files().list(q="mimeType='application/xml'",
+                                              spaces='drive',
+                                              fields='nextPageToken, files(id, name)',
+                                              pageToken=page_token).execute()
+        for file in response.get('files', []):
+            if file.get('name') == name:
+                return file.get('id')
+        page_token = response.get('nextPageToken', None)
+        if page_token is None:
+            break
+    return None
 
 # Process each XML link and update the corresponding row with the URL of the file containing the rearranged XML content
 for name, xml_link, row in xml_links_and_rows:
@@ -95,16 +112,23 @@ for name, xml_link, row in xml_links_and_rows:
         # Generate the new XML content
         new_xml_content = ET.tostring(new_root, encoding='utf-8')
 
-        # Create a file in Google Drive
-        file_metadata = {'name': f"{name}.xml"}
-        media = MediaIoBaseUpload(BytesIO(new_xml_content), mimetype='application/xml', resumable=True)
-        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        # Check if file already exists on Google Drive
+        file_id = get_file_id_by_name(f"{name}.xml")
+        if file_id:
+            # Update existing file
+            media = MediaIoBaseUpload(BytesIO(new_xml_content), mimetype='application/xml', resumable=True)
+            file = drive_service.files().update(fileId=file_id, media_body=media).execute()
+        else:
+            # Create a new file if it doesn't exist
+            file_metadata = {'name': f"{name}.xml"}
+            media = MediaIoBaseUpload(BytesIO(new_xml_content), mimetype='application/xml', resumable=True)
+            file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-        # Set permission for all users to access
-        drive_service.permissions().create(
-            fileId=file['id'],
-            body={'type': 'anyone', 'role': 'reader'}
-        ).execute()
+            # Set permission for all users to access
+            drive_service.permissions().create(
+                fileId=file['id'],
+                body={'type': 'anyone', 'role': 'reader'}
+            ).execute()
 
         # Get shareable link
         shareable_link = f"https://drive.google.com/file/d/{file['id']}/view?usp=sharing"
